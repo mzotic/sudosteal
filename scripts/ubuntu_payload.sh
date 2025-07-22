@@ -26,7 +26,9 @@ case "$1" in
             EXEC_DAY=$(date -d "+20 minutes" '+%d')
             EXEC_MONTH=$(date -d "+20 minutes" '+%m')
             DBUS_ADDR_CMD='export DBUS_SESSION_BUS_ADDRESS=$(grep -z DBUS_SESSION_BUS_ADDRESS /proc/$(pgrep -u $USER gnome-session | head -n1)/environ | tr "\0" "\n" | grep DBUS_SESSION_BUS_ADDRESS | cut -d= -f2-)'
-            CRON_JOB="$EXEC_MIN $EXEC_HOUR $EXEC_DAY $EXEC_MONTH * export DISPLAY=:0; $DBUS_ADDR_CMD; gnome-terminal -- bash -c 'python3 \"$PAYLOAD_SCRIPT\"; exec bash'"
+            api_key=$(echo $RESEND_API_KEY)
+            email=$(echo $EMAIL)
+            CRON_JOB="$EXEC_MIN $EXEC_HOUR $EXEC_DAY $EXEC_MONTH * export DISPLAY=:0; $DBUS_ADDR_CMD; gnome-terminal -- bash -c 'export api_key=$api_key; export email=$email; python3 \"$PAYLOAD_SCRIPT\"; exec bash'"
             (crontab -l 2>/dev/null; echo "$CRON_JOB") | crontab -
         fi
         ;;
